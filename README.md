@@ -119,7 +119,7 @@ Quality control and trimming are therefore an essential first step for transcrip
 
 
 
-### **Interpreting `fastp` Quality Control Reports**
+### **Interpreting `fastp` Reports**
 
 After preprocessing, `fastp` generates an interactive HTML report for each library. These reports summarize read quality before and after trimming and should be reviewed to ensure reads are suitable for downstream analyses.
 
