@@ -31,7 +31,7 @@ The script below initializes a standard directory structure for a de novo transc
 #SBATCH -c 1
 #SBATCH --mem=2G
 #SBATCH --qos=general
-#SBATCH -o /home/FCAM/sabrown/TEST_SET/%x_%A.out
+#SBATCH -o path/to/some/existing/directory/%x_%A.out
 
 ###############################################################
 ###     PROJECT DIRECTORY SET UP FOR RNA-SEQ / ASSEMBLY     ###
@@ -151,22 +151,22 @@ What constitutes “good” or “good enough” read quality is context depende
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=fastp_QC
+#SBATCH --job-name=fastp
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -c 8
 #SBATCH --mem=100G
 #SBATCH --qos=general
-#SBATCH -o /labs/Jockusch/Savanna/LEAFHOPPER/01_ReadQC/logs/%x_%A.out
+#SBATCH -o path/to/base/directory/01_ReadQC/logs/%x_%A.out
 
 echo "Start: $(date)"
 
 module load fastp/0.23.2
 module load parallel/20180122
 
-INDIR="/seqdata/CGI/Fastq_Files/EJockusch_RNAseq_13Jan2026"
+INDIR="/path/to/raw/reads"
 
-OUTBASE="/labs/Jockusch/Savanna/LEAFHOPPER/01_ReadQC"
+OUTBASE="path/to/base/directory/01_ReadQC"
 REPORTDIR="${OUTBASE}/fastp"
 TRIMDIR="${OUTBASE}/trimmed_sequences"
 
@@ -229,7 +229,7 @@ Because most projects involve many libraries, it is often helpful to summarize Q
 #SBATCH -c 2
 #SBATCH --mem=10G
 #SBATCH --qos=general
-#SBATCH -o /home/FCAM/sabrown/TEST_SET/1_READ_QC/logs/%x_%A.out
+#SBATCH -o base/directory/1_READ_QC/logs%x_%A.out
 
 echo $(hostname)
 date
@@ -240,7 +240,7 @@ date
 
 module load MultiQC/1.15
 
-BASE_DIR=/home/FCAM/sabrown/TEST_SET
+BASE_DIR=path/to/base/directory
 FASTP_DIR=${BASE_DIR}/1_READ_QC/fastp
 OUTPUT_DIR=${BASE_DIR}/1_READ_QC/multi_QC
 
@@ -256,7 +256,197 @@ multiqc "$FASTP_DIR" \
 echo "MultiQC report generated in: $OUTPUT_DIR"
 date
 ```
-
+</details>
 ---
 
 <br>
+
+## 2) **rRNA Screening**
+
+Even after read trimming and QC, RNA-seq libraries can contain substantial ribosomal RNA contamination. High rRNA content reduces effective sequencing depth, increases runtime, and can negatively impact de novo assembly quality. An rRNA screening step allows you to (1) assess the extent of rRNA contamination and (2) optionally remove rRNA reads prior to downstream analyses.
+
+<br>
+
+### **`SortMeRNA`**
+`SortMeRNA` screens reads against curated rRNA reference databases (commonly SILVA) and separates rRNA-matching reads from non-rRNA (“clean”) reads.
+
+#### **Key operations performed by `SortMeRNA`**
+- **rRNA detection:** Aligns reads to rRNA reference sequences (e.g. SILVA).
+- **Read partitioning:** Writes rRNA reads to an *aligned* output and non-rRNA reads to an *other/clean* output.
+- **Indexing:** Builds an index of the rRNA reference database (reused across runs).
+- **Paired-end handling:** Processes paired-end reads together using interleaved input.
+
+<br>
+
+**INPUTS** — Trimmed paired-end FASTQ files (`*_R1*.fastq.gz`, `*_R2*.fastq.gz`)  
+&nbsp;&nbsp;↳ Location: `1_READ_QC/trimmed_sequences/`
+
+**OUTPUTS** — rRNA reads, clean reads, logs, and index files  
+&nbsp;&nbsp;↳ Locations: `2_DECONTAM/rRNA_screen/`, `2_DECONTAM/clean_reads/`, `2_DECONTAM/logs/`
+
+<br>
+
+---
+
+### *SCRIPT*
+
+<details>
+<summary><strong>Run sortmerna</strong></summary>
+  
+**Notes:**  
+- This script is submitted as a **SLURM array job**, where each array task processes a single sample (one R1/R2 pair).
+  The `#SBATCH --array` directive controls **how many samples are run and how many run simultaneously**.
+  Format: `--array=0-(N-1)%M`
+       `N` = total number of samples (i.e., number of `*_R1*.fastq.gz` files in input directory `TRIM_DIR`)
+       `M` = maximum number of samples to run at the same time
+- This script automatically discovers samples by scanning `TRIM_DIR` for `*_R1*.fastq.gz` files and selecting one file per array task using `SLURM_ARRAY_TASK_ID`.
+- Assumes paired reads differ only by `_R1` vs `_R2` in the filename.
+- `SortMeRNA` requires paired-end reads to be provided as **interleaved** input when using `--paired_in`, so one interleaved fasta is created per sample, processed, and then removed during cleanup
+- **Screen only vs. screen and clean:**  
+  - Set `SCREEN_ONLY="YES"` to **only screen for rRNA** (writes logs + rRNA read outputs, but does not write clean reads).  
+  - Set `SCREEN_ONLY="NO"` to **screen and also write filtered clean paired-end reads** to `2_DECONTAM/clean_reads/`.
+-  **rRNA reference database:**  
+  - `SortMeRNA` screens reads against curated rRNA reference sequences. The most commonly used database is **SILVA**, which includes 5S, 16S/18S, and 23S/28S rRNA sequences from Bacteria, Archaea, and Eukaryota. You can download the most recent SILVA database online or use a custom database by providing a FASTA file that will be indexed the first time the script is run.
+  - 
+```bash
+#!/bin/bash
+#SBATCH --job-name=sortmerna_rrna
+#SBATCH -n 1
+#SBATCH -N 1
+#SBATCH -c 8
+#SBATCH --mem=32G
+#SBATCH --qos=general
+#SBATCH -o /path/to/project/2_DECONTAM/logs/%x_%A_%a.out
+#SBATCH --array=0-3%4
+
+set -euo pipefail
+
+module load sortmerna/2.1b
+module load seqtk
+
+###############################################
+#                Set paths                    #
+###############################################
+BASE_DIR="/path/to/project"
+
+TRIM_DIR="${BASE_DIR}/1_READ_QC/trimmed_sequences"
+RRNA_DIR="${BASE_DIR}/2_DECONTAM/rRNA_screen"
+CLEAN_DIR="${BASE_DIR}/2_DECONTAM/clean_reads"
+LOG_DIR="${BASE_DIR}/2_DECONTAM/logs"
+IDX_DIR="${RRNA_DIR}/index"
+
+# rRNA reference database (e.g., SILVA)
+RRNA_DB="/path/to/rRNA_db/silva.fasta"
+INDEX_PREFIX="${IDX_DIR}/silva_index"
+
+# Toggle: YES = screen only; NO = also write clean reads
+SCREEN_ONLY="NO"
+
+mkdir -p "$RRNA_DIR" "$CLEAN_DIR" "$LOG_DIR" "$IDX_DIR"
+cd "$RRNA_DIR"
+
+###############################################
+#              Build rRNA index               #
+###############################################
+if [ ! -f "${INDEX_PREFIX}.stats" ]; then
+  echo "Building SortMeRNA index..."
+  indexdb_rna --ref "${RRNA_DB},${INDEX_PREFIX}" -v
+fi
+
+###############################################
+#     Discover inputs and select this task    #
+###############################################
+mapfile -t R1_FILES < <(ls -1 "${TRIM_DIR}"/*_R1*.fastq.gz 2>/dev/null | sort)
+
+if [ "${#R1_FILES[@]}" -eq 0 ]; then
+  echo "Error: No R1 files found in ${TRIM_DIR}"
+  exit 1
+fi
+
+R1="${R1_FILES[$SLURM_ARRAY_TASK_ID]:-}"
+if [ -z "${R1}" ]; then
+  echo "Error: SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID} is out of range."
+  echo "Found ${#R1_FILES[@]} R1 files in ${TRIM_DIR}."
+  exit 1
+fi
+
+R2="${R1/_R1/_R2}"
+if [ ! -f "$R2" ]; then
+  echo "Error: Paired R2 file not found for:"
+  echo "R1: $R1"
+  echo "Expected R2: $R2"
+  exit 1
+fi
+
+sample=$(basename "$R1")
+sample=${sample%%_R1*}
+
+echo "========================================"
+echo "Screening $sample for rRNA contamination"
+echo "R1: $R1"
+echo "R2: $R2"
+echo "SCREEN_ONLY: $SCREEN_ONLY"
+echo "========================================"
+
+###############################################
+#        Interleave reads for SortMeRNA       #
+###############################################
+INTERLEAVED="${RRNA_DIR}/${sample}_interleaved.fastq"
+seqtk mergepe <(zcat "$R1") <(zcat "$R2") > "$INTERLEAVED"
+
+ALIGNED_BASE="${RRNA_DIR}/${sample}_rRNA"
+OTHER_BASE="${RRNA_DIR}/${sample}_clean"
+
+###############################################
+#                 Run SortMeRNA               #
+###############################################
+if [ "$SCREEN_ONLY" = "YES" ]; then
+  sortmerna \
+    --ref "${RRNA_DB},${INDEX_PREFIX}" \
+    --reads "$INTERLEAVED" \
+    --aligned "$ALIGNED_BASE" \
+    --paired_in \
+    --fastx \
+    -a 8 \
+    --log -v \
+    > "${LOG_DIR}/${sample}.sortmerna.log" 2>&1
+else
+  sortmerna \
+    --ref "${RRNA_DB},${INDEX_PREFIX}" \
+    --reads "$INTERLEAVED" \
+    --aligned "$ALIGNED_BASE" \
+    --other "$OTHER_BASE" \
+    --paired_in \
+    --fastx \
+    -a 8 \
+    --log -v \
+    > "${LOG_DIR}/${sample}.sortmerna.log" 2>&1
+fi
+
+###############################################
+#     Split clean reads back to R1/R2         #
+###############################################
+if [ "$SCREEN_ONLY" = "NO" ]; then
+  if [ -f "${OTHER_BASE}.fq" ]; then
+    awk 'NR%8>=1 && NR%8<=4' "${OTHER_BASE}.fq" > "${CLEAN_DIR}/${sample}_clean_R1.fastq"
+    awk 'NR%8>=5 || NR%8==0' "${OTHER_BASE}.fq" > "${CLEAN_DIR}/${sample}_clean_R2.fastq"
+    gzip -f "${CLEAN_DIR}/${sample}_clean_R1.fastq" "${CLEAN_DIR}/${sample}_clean_R2.fastq"
+  else
+    echo "ERROR: ${OTHER_BASE}.fq not created. Check ${LOG_DIR}/${sample}.sortmerna.log"
+    exit 1
+  fi
+fi
+
+###############################################
+#                   Cleanup                   #
+###############################################
+rm -f "$INTERLEAVED"
+if [ "$SCREEN_ONLY" = "NO" ]; then
+  rm -f "${OTHER_BASE}.fq"
+fi
+
+echo "Sample $sample complete"
+"
+
+```
+</details>
